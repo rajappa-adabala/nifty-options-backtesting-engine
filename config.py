@@ -28,5 +28,16 @@ USE_DB = False
 DB_URL = "postgresql://user:password@localhost:5432/options_bt"
 # Tables will be auto-created on first run if USE_DB = True
 
+# ── MongoDB (optional) — for high-volume market snapshot storage ──────────────
+USE_MONGO = False
+MONGO_URL = "mongodb://localhost:27017"
+MONGO_DB_NAME = "options_bt"
+# Used for: raw per-minute snapshots (semi-structured, high write volume)
+# Postgres (above) is used for: structured trade ledger (relational, low volume)
+
+# ── Concurrency ───────────────────────────────────────────────────────────────
+PARALLEL_WORKERS = 4   # number of processes for parallel expiry backtesting
+# Set to 1 to disable parallelism (sequential, easier to debug)
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL = "INFO"   # DEBUG | INFO | WARNING | ERROR

@@ -37,3 +37,66 @@ config_local.py
 .pytest_cache/
 htmlcov/
 .coverage
+
+# 1. Make sure we are in the project root
+cd D:\PROJECTS\opensource\tester
+
+# 2. Add generated/large files to .gitignore
+@"
+
+# Large/generated market data
+data/raw/*.csv
+data/processed/**/*.parquet
+
+# Runtime/local storage
+storage/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment/secrets
+.env
+.env.*
+
+# IDE/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+"@ | Add-Content .gitignore
+
+# 3. Stage all source-code changes
+git add README.md
+git add .gitignore
+git add requirements.txt
+
+git add api/
+git add backtester/
+git add config.py
+git add data/loader.py
+git add data/prepare_data.py
+git add data/preprocess.py
+git add tests/test_api.py
+
+# 4. Check exactly what is going to GitHub
+git status
+
+# 5. Show staged files only
+git diff --cached --name-only
+
+# 6. Commit
+git commit -m "Add async API and memory-efficient parallel backtesting"
+
+# 7. Push to GitHub
+git push origin main
+
+# 8. Final check
+git status

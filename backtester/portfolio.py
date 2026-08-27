@@ -159,7 +159,24 @@ class Portfolio:
     def summary(self) -> dict:
         closed = self.closed_trades
         if not closed:
-            return {}
+            # Return a real zero-valued summary instead of {} — an empty
+            # dict is falsy in Python and was previously indistinguishable
+            # from "no summary yet" at the API layer (job["summary"] truthy
+            # check), which caused completed-but-zero-trade jobs to report
+            # summary=None to clients. Always return a consistent shape.
+            return {
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 0.0,
+                "gross_pnl": 0.0,
+                "total_costs": 0.0,
+                "net_pnl": 0.0,
+                "avg_pnl_per_trade": 0.0,
+                "best_trade": 0.0,
+                "worst_trade": 0.0,
+                "max_drawdown": 0.0,
+            }
         pnls = [t.net_pnl for t in closed]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p <= 0]

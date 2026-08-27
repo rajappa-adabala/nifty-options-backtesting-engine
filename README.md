@@ -1,21 +1,82 @@
-# Options Backtesting Engine
+# NSE Options Backtesting Engine
 
-A clean, production-style Python backtesting engine for **NSE options strategies** — built specifically for Indian derivatives markets.
+A backtesting engine for Indian options strategies, built from scratch in Python — no Backtrader, no Zipline. Tests strategy logic against real minute-level NIFTY options data with realistic cost modeling, exposes the engine as a REST API, persists results across PostgreSQL and MongoDB, and parallelizes execution across CPU cores.
 
-Supports strategy-level backtesting on historical NIFTY/BANKNIFTY options data with realistic P&L calculation, slippage modeling, stop-loss handling, and trade logging.
+Backtested on **4.86M rows of real NSE options data** spanning 78 weekly expiries (Oct 2024 – Mar 2026). Sell ATM Straddle on expiry day: **+₹86,358 net P&L, 56.4% win rate**, on actual market premiums and IV.
 
 ---
 
-## Features
+## Real Backtest Results
 
-- **Sell ATM Straddle on Expiry Day** strategy (and extensible to any)
-- Realistic slippage + brokerage model (Zerodha-style flat ₹20/order)
-- Stop-loss support (strategy-level and leg-level)
-- Detailed trade log exported to CSV
-- Summary P&L report per expiry
-- Modular strategy interface — plug in your own strategies
-- Uses **free NSE historical data** (no API key needed)
-- PostgreSQL storage for snapshots (optional, togglable)
+```
+==============================================================
+   BACKTEST SUMMARY — ATM STRADDLE (NIFTY)
+==============================================================
+  Period         : 2024-10-01 → 2026-03-31
+  Total Expiries : 78
+  Trades Taken   : 78
+  Wins           : 44     (56.4%)
+  Losses         : 34     (43.6%)
+--------------------------------------------------------------
+  Gross P&L      : ₹    98,963.43
+  Total Costs    : ₹    12,605.60   (brokerage + slippage)
+  Net P&L        : ₹    86,357.83
+--------------------------------------------------------------
+  Max Drawdown   : ₹    15,414.70
+  Avg P&L/Trade  : ₹     1,107.15
+  Best Trade     : ₹    19,260.77  (03-Feb-2026)
+  Worst Trade    : ₹    -6,802.25  (05-Dec-2024)
+==============================================================
+```
+
+Config: 50% stop-loss on premium received, 0.5% slippage per leg, ₹20 flat brokerage per order, NIFTY lot size 50. Full per-trade CSV saved automatically to `results/` on every CLI run.
+
+---
+
+## What this is
+
+- Loads a **6GB minute-level options dataset** (4.86M rows after expiry-day filtering) via chunked pandas reads — no out-of-memory errors
+- Reconstructs **per-minute market snapshots** (every strike, both CE/PE, real LTP/IV/OI) for each of 78 real expiry dates
+- Runs a configurable, pluggable strategy engine tick by tick against those snapshots
+- Applies a realistic cost model: per-leg slippage, flat brokerage, stop-loss on combined premium
+- Falls back to GBM-simulated synthetic data when no real CSV is present, so it runs out of the box with zero setup
+- Exposes the engine as a **REST API** (FastAPI) — async job submission, polling, paginated results
+- Persists structured trades to **PostgreSQL** and high-volume raw snapshots to **MongoDB**
+- **Parallelizes** backtests across CPU cores via multiprocessing for large date ranges
+- CI on every push via **GitHub Actions** (38 unit tests + API integration tests)
+
+---
+
+## Architecture
+
+```
+                    ┌─────────────────┐
+                    │   REST API      │  FastAPI — POST /backtest, GET /backtest/{id}
+                    │  (api/main.py)  │  async job submission + polling
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+              ┌─────┤  Engine Layer   ├─────┐
+              │     │ sequential  or  │     │
+              │     │ parallel (mp)   │     │
+              │     └────────┬────────┘     │
+              │              │              │
+      ┌───────▼──────┐ ┌─────▼──────┐ ┌─────▼──────┐
+      │  Strategy    │ │ Portfolio  │ │ DataLoader │
+      │ (pluggable)  │ │ (P&L, SL)  │ │(CSV/synth) │
+      └──────────────┘ └─────┬──────┘ └────────────┘
+                              │
+                ┌─────────────┴─────────────┐
+                │                           │
+        ┌───────▼────────┐         ┌────────▼────────┐
+        │   PostgreSQL    │         │    MongoDB      │
+        │  trades, legs   │         │ raw snapshots   │
+        │ (relational,    │         │(high-volume,    │
+        │  low-volume)    │         │ schema-flexible)│
+        └─────────────────┘         └─────────────────┘
+```
+
+**Why two databases:** trade records are structured, relational, and low-volume — a natural fit for Postgres with proper joins between trades and legs. Market snapshots are the opposite: ~375 documents per expiry day, each with a variable-length embedded contracts array (strikes get added/removed across expiries) — the shape Mongo is built for. Forcing both into one engine would mean either a rigid schema on high-volume tick data, or losing relational integrity on the trade ledger.
 
 ---
 
@@ -24,43 +85,50 @@ Supports strategy-level backtesting on historical NIFTY/BANKNIFTY options data w
 ```
 options_backtester/
 │
+├── api/
+│   ├── main.py             # FastAPI app: /backtest, /backtest/{id}, /backtest/{id}/trades
+│   ├── schemas.py           # Pydantic request/response models, validation
+│   └── jobs.py              # In-memory job store (thread-safe) for async job tracking
+│
 ├── backtester/
-│   ├── engine.py          # Core backtesting loop
-│   ├── portfolio.py       # Position & P&L tracking
-│   └── models.py          # Trade, Position, OrderResult dataclasses
+│   ├── engine.py            # Sequential engine: iterate expiries → snapshots → entry/SL/exit
+│   ├── parallel_engine.py   # Multiprocessing wrapper — fans expiries across CPU cores
+│   ├── portfolio.py         # Position tracking, cost application, stop-loss checks
+│   └── models.py            # Trade, Leg, OptionContract, MarketSnapshot dataclasses
 │
 ├── strategies/
-│   ├── base.py            # Abstract strategy interface
-│   └── atm_straddle.py    # ATM Straddle on expiry day
+│   ├── base.py              # Abstract strategy interface (3 methods to implement)
+│   └── atm_straddle.py      # Sell ATM CE + PE on expiry day, hold to EOD
 │
 ├── data/
-│   ├── raw/               # Place downloaded CSV files here
-│   ├── processed/         # Auto-generated cleaned data
-│   └── loader.py          # Data loading & preprocessing
+│   ├── raw/                 # Place your options CSV here (nifty_options.csv)
+│   └── loader.py            # Real data loader (chunked) + synthetic GBM fallback
+│
+├── storage/
+│   └── mongo_store.py        # MongoDB layer: snapshot bulk writes, job persistence
 │
 ├── utils/
-│   ├── options_math.py    # Greeks: Delta, Gamma, Vega, Theta (Black-Scholes)
-│   ├── nse_utils.py       # Expiry calendars, ATM strike finder
-│   └── db.py              # PostgreSQL storage (optional)
+│   ├── options_math.py      # Black-Scholes: Delta, Gamma, Theta, Vega, IV solver
+│   ├── nse_utils.py          # Expiry calendar (Thursday/Wednesday), ATM strike finder
+│   └── db.py                 # PostgreSQL persistence (trades + legs, auto-creates schema)
 │
 ├── scripts/
-│   ├── download_data.py   # Download historical data from NSE/Unofficed
-│   └── run_backtest.py    # CLI entrypoint
+│   ├── run_backtest.py       # CLI entrypoint
+│   └── download_data.py      # NSE bhavcopy downloader (best-effort)
 │
 ├── tests/
-│   └── test_engine.py     # Unit tests
+│   ├── test_engine.py        # 38 unit tests — Black-Scholes, NSE utils, models, portfolio
+│   └── test_api.py            # FastAPI integration tests (TestClient, full job lifecycle)
 │
-├── results/               # CSV trade logs auto-saved here
-├── requirements.txt
-├── config.py              # All config in one place
-└── README.md
+├── .github/workflows/ci.yml   # GitHub Actions: run tests on every push/PR
+├── results/                    # Trade log CSVs land here after each CLI run
+├── config.py                   # All tunables: Postgres, Mongo, slippage, concurrency
+└── requirements.txt
 ```
 
 ---
 
 ## Quickstart
-
-### 1. Clone & install
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/options-backtester.git
@@ -70,125 +138,172 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Download historical data
+### Option A — CLI (synthetic data, zero setup)
 
 ```bash
-python scripts/download_data.py --symbol NIFTY --year 2023
-```
-
-This downloads free NSE options data from [Unofficed](https://www.unofficed.com/) or uses bundled sample data.
-
-### 3. Run a backtest
-
-```bash
-# Basic run
-python scripts/run_backtest.py --strategy atm_straddle --symbol NIFTY --from 2023-01-01 --to 2023-12-31
-
-# With stop-loss
 python scripts/run_backtest.py --strategy atm_straddle --symbol NIFTY --from 2023-01-01 --to 2023-12-31 --stoploss 50
-
-# With slippage
-python scripts/run_backtest.py --strategy atm_straddle --symbol NIFTY --from 2023-01-01 --to 2023-12-31 --slippage 2.0
 ```
 
-### 4. View results
+### Option B — CLI with real data
 
-Results are saved to `results/trade_log_YYYYMMDD_HHMMSS.csv`. The terminal also prints a full summary:
-
+Drop a minute-level options CSV at `data/raw/nifty_options.csv` with columns:
 ```
-============================================================
-         BACKTEST SUMMARY — ATM Straddle (NIFTY)
-============================================================
-Period         : 2023-01-01 → 2023-12-31
-Total Expiries : 48
-Trades Taken   : 48
-Wins           : 31   (64.6%)
-Losses         : 17   (35.4%)
-------------------------------------------------------------
-Gross P&L      : ₹ 1,24,350
-Brokerage      : ₹   1,920
-Net P&L        : ₹ 1,22,430
-Max Drawdown   : ₹  18,200
-Avg P&L/Trade  : ₹   2,550
-Best Trade     : ₹  12,400
-Worst Trade    : ₹  -9,800
-============================================================
+strike_price, option_type, expiry, timestamp, ltp, volume, oi,
+underlying_spot_price, iv, delta, gamma, theta, vega, rho
 ```
 
----
+```bash
+python scripts/run_backtest.py --strategy atm_straddle --symbol NIFTY --from 2024-10-01 --to 2026-03-31 --stoploss 50 --slippage 0.5
+```
 
-## Data Sources (Free, No API Key)
+First run takes 60–120s to load and cache the file (chunked at 500k rows/chunk).
 
-| Source | What | URL |
-|--------|------|-----|
-| NSE India | Official options bhavcopy (EOD) | https://www.nseindia.com/market-data/historical-data |
-| Unofficed | Minute-level options data (limited free) | https://www.unofficed.com |
-| Sample CSV | Bundled 3-month NIFTY data (2023 Q1) | `data/raw/sample_nifty_2023_Q1.csv` |
+### Option C — REST API
 
----
+```bash
+uvicorn api.main:app --reload --port 8000
+```
 
-## Configuration (`config.py`)
+Open `http://localhost:8000/docs` for interactive Swagger UI, or call it directly:
+
+```bash
+# Submit a backtest
+curl -X POST http://localhost:8000/backtest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "strategy": "atm_straddle",
+    "symbol": "NIFTY",
+    "from_date": "2024-10-01",
+    "to_date": "2024-12-31",
+    "stoploss_pct": 50,
+    "slippage_pct": 0.5,
+    "parallel": true
+  }'
+# -> {"job_id": "a1b2c3...", "status": "pending", "message": "..."}
+
+# Poll for status / result
+curl http://localhost:8000/backtest/a1b2c3...
+
+# Get paginated trade log
+curl "http://localhost:8000/backtest/a1b2c3.../trades?page=1&page_size=20"
+```
+
+### Option D — Parallel backtest (Python)
 
 ```python
-SYMBOL = "NIFTY"
-LOT_SIZE = 50          # NIFTY lot size
-SLIPPAGE_PCT = 0.5     # % slippage on each leg
-BROKERAGE_PER_ORDER = 20   # Zerodha-style flat ₹20
-STOPLOSS_PCT = None    # Set to e.g. 50 for 50% SL on premium received
-USE_DB = False         # Set True + fill DB_URL to persist to PostgreSQL
+from datetime import datetime
+from backtester.parallel_engine import ParallelBacktestEngine
+from strategies.atm_straddle import ATMStraddleStrategy
+
+engine = ParallelBacktestEngine(
+    strategy_cls=ATMStraddleStrategy,
+    symbol="NIFTY",
+    start_date=datetime(2024, 10, 1),
+    end_date=datetime(2026, 3, 31),
+    num_workers=4,
+)
+portfolio = engine.run()
+print(portfolio.summary())
+```
+
+On the full 78-expiry real dataset, 4 workers cuts wall-clock time from ~4.5 minutes (sequential) to roughly 75–90 seconds, since each expiry's backtest is fully independent and embarrassingly parallel.
+
+### Enable PostgreSQL + MongoDB
+
+In `config.py`:
+```python
+USE_DB = True
 DB_URL = "postgresql://user:pass@localhost:5432/options_bt"
+
+USE_MONGO = True
+MONGO_URL = "mongodb://localhost:27017"
 ```
 
+Tables/indexes auto-create on first use — no manual migration step.
+
+### Run tests
+
+```bash
+# Unit tests (engine, math, models — 38 tests)
+pytest tests/test_engine.py -v
+
+# API integration tests (full job lifecycle via TestClient)
+pytest tests/test_api.py -v
+
+# Everything
+pytest tests/ -v
+```
+
+CI runs both suites on every push via `.github/workflows/ci.yml`.
+
 ---
 
-## Strategy: ATM Straddle on Expiry Day
+## API Reference
 
-**Logic:**
-1. On every weekly/monthly expiry morning, identify the ATM strike (closest to spot)
-2. Sell 1 lot of ATM CE + 1 lot of ATM PE
-3. Hold till EOD (or stop-loss hit)
-4. Buy back at closing price
-5. P&L = Premium collected − Premium paid back − Brokerage − Slippage
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `POST` | `/backtest` | Submit a job (202 Accepted, returns `job_id`) |
+| `GET` | `/backtest/{job_id}` | Status + summary P&L |
+| `GET` | `/backtest/{job_id}/trades` | Paginated trade-level log |
+| `DELETE` | `/backtest/{job_id}` | Remove job from store |
 
-**Why this works (historically):** On expiry day, theta decay is maximal. IV crush accelerates. Most expiries close near ATM, making straddles profitable.
+Jobs run as FastAPI `BackgroundTasks` so `POST /backtest` returns immediately rather than blocking for minutes on large date ranges. Request validation (date ranges, stop-loss bounds, strategy enum) happens via Pydantic before a job is even created.
 
 ---
 
-## Adding Your Own Strategy
+## CLI Reference
+
+| Flag | Description | Default |
+|---|---|---|
+| `--strategy` | Strategy name (`atm_straddle`) | required |
+| `--symbol` | `NIFTY` or `BANKNIFTY` | `NIFTY` |
+| `--from` / `--to` | Date range (`YYYY-MM-DD`) | required |
+| `--stoploss` | Stop-loss % on premium received | disabled |
+| `--slippage` | Slippage % per leg | `0.5` |
+| `--lot-size` | Override lot size | `50` |
+| `--save-db` | Persist trades to PostgreSQL | off |
+| `--verbose` | DEBUG-level logs | off |
+
+---
+
+## Strategy: Sell ATM Straddle on Expiry Day
+
+1. On expiry morning, find the strike closest to spot (ATM)
+2. Sell 1 lot ATM CE + 1 lot ATM PE
+3. Hold until EOD, or until combined premium rises past the stop-loss threshold
+4. Buy back (or let expire) at close
+5. Net P&L = premium collected − premium paid back − brokerage − slippage
+
+A theta-decay play: on expiry day, time value collapses fastest and IV crush accelerates. Profits when the underlying stays range-bound; loses on large directional moves, which the stop-loss caps.
+
+### Adding a new strategy
 
 ```python
-# strategies/my_strategy.py
 from strategies.base import BaseStrategy
 
 class MyStrategy(BaseStrategy):
-    def should_enter(self, snapshot) -> bool:
-        # your entry logic
-        return True
-
-    def get_legs(self, snapshot) -> list:
-        # return list of Leg objects to trade
-        return [...]
-
-    def should_exit(self, position, current_snapshot) -> bool:
-        # your exit logic
-        return False
+    def should_enter(self, snapshot) -> bool: ...
+    def get_legs(self, snapshot, lot_size) -> list: ...
+    def should_exit(self, trade, snapshot) -> bool: ...
 ```
 
-Register it in `scripts/run_backtest.py` and pass `--strategy my_strategy`.
+Register it in `strategies/__init__.py`'s `STRATEGY_REGISTRY`, add it to `api/schemas.py`'s `StrategyName` enum, and it's immediately available via both CLI (`--strategy`) and API.
+
+---
+
+## Known limitations (documented honestly, not hidden)
+
+- **Data anomaly**: one trade (26-Dec-2024) shows an inflated premium caused by a stale far-OTM row briefly matching the ATM lookup at market open. A production fix would constrain ATM search to strikes within ~2% of spot.
+- **Config mutation in concurrent API jobs**: `_run_backtest_job` currently mutates the shared `config` module for stop-loss/slippage overrides, which would race if two jobs with different parameters ran concurrently. A production version would thread these as explicit engine constructor arguments instead.
+- **Job store is in-memory**: fine for a single-process deployment; horizontally scaling the API would require moving job state to Redis so all replicas see the same status.
+- **Parallel engine re-reads data per worker**: each process loads its own slice of the CSV rather than sharing one in-memory DataFrame, trading some I/O redundancy for simpler process isolation.
 
 ---
 
 ## Tech Stack
 
-- **Python 3.10+**
-- **pandas** — data manipulation
-- **numpy** — numerical ops
-- **scipy** — Black-Scholes Greeks
-- **psycopg2** — PostgreSQL (optional)
-- **argparse** — CLI
-- **pytest** — testing
-
----
+Python 3.10+, FastAPI, Pydantic, pandas, numpy, scipy (Black-Scholes), PostgreSQL (psycopg2), MongoDB (pymongo), multiprocessing, pytest, GitHub Actions.
 
 ## License
 
